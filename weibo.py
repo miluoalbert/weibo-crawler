@@ -12,6 +12,8 @@ import os
 import random
 import re
 import sqlite3
+import psycopg2
+import psycopg2.extras
 import sys
 import warnings
 import webbrowser
@@ -97,9 +99,13 @@ class Weibo(object):
             "user_id_as_folder_name", 0
         )  # 结果目录名，取值为0或1，决定结果文件存储在用户昵称文件夹里还是用户id文件夹里
         cookie = config.get("cookie")  # 微博cookie，可填可不填
-        user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/86.0.4240.111 Safari/537.36"
-        self.headers = {"User_Agent": user_agent, "Cookie": cookie}
+        self.cookie = cookie
+        # user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/86.0.4240.111 Safari/537.36"
+        user_agent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36'
+        cap_user_agent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36'
+        self.headers = {"User_Agent": cap_user_agent, "user_agent": user_agent, "Cookie": cookie}
         self.mysql_config = config.get("mysql_config")  # MySQL数据库连接配置，可以不填
+        self.postgres_config = config.get("postgres_config")  # PostgreSQL数据库连接配置，可以不填
         self.mongodb_URI = config.get("mongodb_URI")  # MongoDB数据库连接字符串，可以不填
         self.post_config = config.get("post_config")  # post_config，可以不填
         self.page_weibo_count = config.get("page_weibo_count")  # page_weibo_count，爬取一页的微博数，默认10页
@@ -171,7 +177,7 @@ class Weibo(object):
             sys.exit()
 
         # 验证write_mode
-        write_mode = ["csv", "json", "mongo", "mysql", "sqlite", "post"]
+        write_mode = ["csv", "json", "mongo", "mysql", "sqlite", "post", "postgres"]
         if not isinstance(config["write_mode"], list):
             sys.exit("write_mode值应为list类型")
         for mode in config["write_mode"]:
@@ -204,6 +210,13 @@ class Weibo(object):
         if (not isinstance(since_date, int)) and (not self.is_datetime(since_date)) and (not self.is_date(since_date)):
             logger.warning("since_date值应为yyyy-mm-dd形式、yyyy-mm-ddTHH:MM:SS形式或整数，请重新输入")
             sys.exit()
+
+        # 验证PostgreSQL配置
+        if config.get("postgres_config"):
+            required_keys = ["host", "port", "user", "password", "dbname"]
+            for key in required_keys:
+                if key not in config["postgres_config"]:
+                    logger.warning(f"PostgreSQL配置缺少必要的'{key}'字段")
 
         comment_max_count = config["comment_max_download_count"]
         if not isinstance(comment_max_count, int):
@@ -384,7 +397,7 @@ class Weibo(object):
             if last_weibo_msg
             else self.user_config["since_date"]
         )
-
+    
     def user_to_mongodb(self):
         """将爬取的用户信息写入MongoDB数据库"""
         user_list = [self.user]
@@ -434,6 +447,24 @@ class Weibo(object):
         self.mysql_insert(mysql_config, "user", [self.user])
         logger.info("%s信息写入MySQL数据库完毕", self.user["screen_name"])
 
+    def user_to_postgres(self):
+        """将爬取的用户信息写入PostgreSQL数据库"""
+        postgres_config = {
+            "host": "localhost",
+            "port": 5432,
+            "user": "postgres",
+            "password": "postgres",
+            "dbname": "postgres",
+        }
+        
+        # 更新配置使用weibo数据库
+        postgres_config["dbname"] = "weibo"
+        if self.postgres_config:
+            postgres_config = self.postgres_config
+        
+        self.postgres_insert(postgres_config, "weibo_user", [self.user])
+        logger.info("%s信息写入PostgreSQL数据库完毕", self.user["screen_name"])
+
     def user_to_database(self):
         """将用户信息写入文件/数据库"""
         self.user_to_csv()
@@ -443,6 +474,8 @@ class Weibo(object):
             self.user_to_mongodb()
         if "sqlite" in self.write_mode:
             self.user_to_sqlite()
+        if "postgres" in self.write_mode:
+            self.user_to_postgres()
 
     def get_user_info(self):
         """获取用户信息"""
@@ -545,11 +578,47 @@ class Weibo(object):
 
     def get_long_weibo(self, id):
         """获取长微博"""
-        url = "https://m.weibo.cn/detail/%s" % id
+        # url = "https://m.weibo.cn/detail/%s" % id
+        url = "https://m.weibo.cn/status/%s" % id
         logger.info(f"""URL: {url} """)
         for i in range(5):
             sleep(random.uniform(1.0, 2.5))
-            html = self.session.get(url, headers=self.headers, verify=False).text
+            headers = {
+                'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                'accept-language': 'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7',
+                'cache-control': 'max-age=0',
+                'priority': 'u=0, i',
+                'sec-ch-ua': '"Google Chrome";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
+                'sec-ch-ua-mobile': '?0',
+                'sec-ch-ua-platform': '"macOS"',
+                'sec-fetch-dest': 'document',
+                'sec-fetch-mode': 'navigate',
+                'sec-fetch-site': 'same-origin',
+                'sec-fetch-user': '?1',
+                'upgrade-insecure-requests': '1',
+                'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36',
+                'Referer': 'https://m.weibo.cn/',
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36',
+                'Origin': 'https://m.weibo.cn',
+                # 'X-XSRF-TOKEN': '66d179',
+                'MWeibo-Pwa': '1',
+                'X-Requested-With': 'XMLHttpRequest',
+                'Accept': 'application/json, text/plain, */*',
+                'mweibo-pwa': '1',
+                'referer': url,
+                'x-requested-with': 'XMLHttpRequest',
+                # 'x-xsrf-token': '66d179',
+                'sec-fetch-storage-access': 'active',
+                'Accept-Language': 'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7',
+                'Connection': 'keep-alive',
+                'Sec-Fetch-Dest': 'image',
+                'Sec-Fetch-Mode': 'no-cors',
+                'Sec-Fetch-Site': 'same-site',
+                'Sec-Fetch-Storage-Access': 'active',
+                'Cookie': self.cookie
+                }
+            # html = self.session.get(url, headers=self.headers, verify=False).text
+            html = self.session.get(url, headers=headers, verify=False).text
             html = html[html.find('"status":') :]
             html = html[: html.rfind('"call"')]
             html = html[: html.rfind(",")]
@@ -1117,11 +1186,28 @@ class Weibo(object):
         params = {"mid": id}
         if max_id:
             params["max_id"] = max_id
+        headers = {
+            'Upgrade-Insecure-Requests': '1',
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36',
+            'sec-ch-ua': '"Google Chrome";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"macOS"',
+            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+            'accept-language': 'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7',
+            'priority': 'u=0, i',
+            'sec-fetch-dest': 'empty',
+            'sec-fetch-mode': 'navigate',
+            'sec-fetch-site': 'same-origin',
+            'upgrade-insecure-requests': '1',
+            'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36',
+            'Cookie': self.cookie
+        }
         url = "https://m.weibo.cn/comments/hotflow?max_id_type=0"
         req = self.session.get(
             url,
             params=params,
-            headers=self.headers,
+            # headers=self.headers,
+            headers=headers,
         )
         json = None
         error = False
@@ -1182,7 +1268,22 @@ class Weibo(object):
         url = "https://m.weibo.cn/api/comments/show?id={id}&page={page}".format(
             id=id, page=page
         )
-        req = self.session.get(url)
+        headers = {
+            'Upgrade-Insecure-Requests': '1',
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36',
+            'sec-ch-ua': '"Google Chrome";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"macOS"',
+            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+            'accept-language': 'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7',
+            'priority': 'u=0, i',
+            'sec-fetch-dest': 'empty',
+            'sec-fetch-mode': 'navigate',
+            'sec-fetch-site': 'same-origin',
+            'upgrade-insecure-requests': '1',
+            'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36'
+        }
+        req = self.session.get(url, headers=headers)
         json = None
         try:
             json = req.json()
@@ -1235,10 +1336,27 @@ class Weibo(object):
         id = weibo["id"]
         url = "https://m.weibo.cn/api/statuses/repostTimeline"
         params = {"id": id, "page": page}
+        headers = {
+            'Upgrade-Insecure-Requests': '1',
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36',
+            'sec-ch-ua': '"Google Chrome";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"macOS"',
+            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+            'accept-language': 'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7',
+            'priority': 'u=0, i',
+            'sec-fetch-dest': 'empty',
+            'sec-fetch-mode': 'navigate',
+            'sec-fetch-site': 'same-origin',
+            'upgrade-insecure-requests': '1',
+            'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36',
+            'Cookie': self.cookie
+        }
         req = self.session.get(
             url,
             params=params,
-            headers=self.headers,
+            # headers=self.headers,
+            headers=headers,
         )
 
         json = None
@@ -1697,6 +1815,371 @@ class Weibo(object):
         connection = pymysql.connect(**mysql_config)
         self.mysql_create(connection, sql)
 
+    def postgres_insert(self, postgres_config, table, data_list):
+        """
+        向PostgreSQL表插入或更新数据
+
+        Parameters
+        ----------
+        postgres_config: map
+            PostgreSQL配置表
+        table: str
+            要插入的表名
+        data_list: list
+            要插入的数据列表
+
+        Returns
+        -------
+        bool: SQL执行结果
+        """
+
+        if len(data_list) > 0:
+            if self.postgres_config:
+                postgres_config = self.postgres_config
+            
+            try:
+                conn = psycopg2.connect(
+                    host=postgres_config["host"],
+                    port=postgres_config["port"],
+                    user=postgres_config["user"],
+                    password=postgres_config["password"],
+                    dbname=postgres_config["dbname"]
+                )
+                
+                with conn.cursor() as cursor:
+                    # 构建插入或更新语句
+                    columns = list(data_list[0].keys())
+                    values_placeholder = ", ".join(["%s"] * len(columns))
+                    columns_str = ", ".join(columns)
+                    
+                    # 构建ON CONFLICT DO UPDATE部分
+                    update_str = ", ".join([f"{col} = EXCLUDED.{col}" for col in columns if col != "id"])
+                    
+                    sql = f"""
+                    INSERT INTO {table} ({columns_str}) 
+                    VALUES ({values_placeholder})
+                    ON CONFLICT (id) DO UPDATE SET {update_str}
+                    """
+                    
+                    # 准备数据
+                    values = []
+                    for data in data_list:
+                        row = []
+                        for col in columns:
+                            row.append(data[col])
+                        values.append(tuple(row))
+                    
+                    # 执行批量插入
+                    psycopg2.extras.execute_batch(cursor, sql, values)
+                    conn.commit()
+                
+                conn.close()
+                return True
+            except Exception as e:
+                logger.exception(f"PostgreSQL插入数据时出错: {e}")
+                return False
+    
+    def init_tables_in_postgres(self):
+        """初始化PostgreSQL数据库中的表"""
+        postgres_config = {
+            "host": "localhost",
+            "port": 5432,
+            "user": "postgres",
+            "password": "postgres",
+            "dbname": "weibo",
+        }
+        if self.postgres_config:
+            postgres_config = self.postgres_config
+
+        # 分别定义每个表的创建语句
+        create_user_table = """
+            CREATE TABLE IF NOT EXISTS weibo_user (
+                id varchar(20) NOT NULL,
+                screen_name varchar(64),
+                gender varchar(6),
+                statuses_count INT,
+                followers_count INT,
+                follow_count INT,
+                registration_time varchar(20),
+                sunshine varchar(20),
+                birthday varchar(40),
+                location varchar(200),
+                education varchar(200),
+                company varchar(200),
+                description text,
+                profile_url varchar(200),
+                profile_image_url varchar(200),
+                avatar_hd varchar(200),
+                urank INT,
+                mbrank INT,
+                verified BOOLEAN DEFAULT FALSE,
+                verified_type INT,
+                verified_reason varchar(140),
+                PRIMARY KEY (id)
+            );"""
+            
+        create_weibo_table = """
+            CREATE TABLE IF NOT EXISTS weibo (
+                id varchar(20) NOT NULL,
+                bid varchar(12) NOT NULL,
+                user_id varchar(20),
+                screen_name varchar(30),
+                text text,
+                article_url varchar(100),
+                topics varchar(400),
+                at_users varchar(1000),
+                pics varchar(3000),
+                video_url varchar(1000),
+                live_photo_url varchar(1000),
+                location varchar(100),
+                created_at TIMESTAMP,
+                source varchar(30),
+                attitudes_count INT,
+                comments_count INT,
+                reposts_count INT,
+                retweet_id varchar(20),
+                PRIMARY KEY (id)
+            );"""
+            
+        create_comments_table = """
+            CREATE TABLE IF NOT EXISTS comments (
+                id varchar(20) NOT NULL,
+                bid varchar(20) NOT NULL,
+                weibo_id varchar(32) NOT NULL,
+                root_id varchar(20),
+                user_id varchar(20) NOT NULL,
+                created_at varchar(20),
+                user_screen_name varchar(64) NOT NULL,
+                user_avatar_url text,
+                text text,
+                pic_url text,
+                like_count integer,
+                PRIMARY KEY (id)
+            );"""
+            
+        create_reposts_table = """
+            CREATE TABLE IF NOT EXISTS reposts (
+                id varchar(20) NOT NULL,
+                bid varchar(20) NOT NULL,
+                weibo_id varchar(32) NOT NULL,
+                user_id varchar(20) NOT NULL,
+                created_at varchar(20),
+                user_screen_name varchar(64) NOT NULL,
+                user_avatar_url text,
+                text text,
+                like_count integer,
+                PRIMARY KEY (id)
+            );"""
+
+        try:
+            conn = psycopg2.connect(
+                host=postgres_config["host"],
+                port=postgres_config["port"],
+                user=postgres_config["user"],
+                password=postgres_config["password"],
+                dbname=postgres_config["dbname"]
+            )
+            conn.autocommit = True
+
+            with conn.cursor() as cursor:
+                # 分别执行每个表的创建语句
+                cursor.execute(create_user_table)
+                cursor.execute(create_weibo_table)
+                cursor.execute(create_comments_table)
+                cursor.execute(create_reposts_table)
+            
+            conn.close()
+            logger.info("PostgreSQL 表创建成功")
+        except Exception as e:
+            logger.exception(f"创建PostgreSQL表时出错: {e}")
+        return
+
+    def weibo_to_postgres(self, wrote_count):
+        """将爬取的微博信息写入PostgreSQL数据库"""
+        postgres_config = self.postgres_config
+        
+        # 要插入的微博列表
+        weibo_list = []
+        # 要插入的转发微博列表
+        retweet_list = []
+
+        if len(self.write_mode) > 1:
+            info_list = copy.deepcopy(self.weibo[wrote_count:])
+        else:
+            info_list = self.weibo[wrote_count:]
+        for w in info_list:
+            w["created_at"] = w["full_created_at"]
+            del w["full_created_at"]
+
+            if "retweet" in w:
+                r = w["retweet"]
+                r["retweet_id"] = ""
+                r["created_at"] = r["full_created_at"]
+                del r["full_created_at"]
+                retweet_list.append(r)
+                w["retweet_id"] = r["id"]
+                del w["retweet"]
+            else:
+                w["retweet_id"] = ""
+            weibo_list.append(w)
+        
+        # 在'weibo'表中插入或更新微博数据
+        self.postgres_insert(postgres_config, "weibo", retweet_list)
+        self.postgres_insert(postgres_config, "weibo", weibo_list)
+        logger.info("%d条微博写入PostgreSQL数据库完毕", self.got_count)
+
+        comment_max_count = self.comment_max_download_count
+        repost_max_count = self.comment_max_download_count
+        download_comment = self.download_comment and comment_max_count > 0
+        download_repost = self.download_repost and repost_max_count > 0
+        count = 0
+        for weibo in weibo_list:
+            if (download_comment) and (weibo["comments_count"] > 0):
+                self.get_weibo_comments(
+                    weibo, comment_max_count, self.postgres_insert_comments
+                )
+                count += 1
+                if count % 20:
+                    sleep(random.randint(3, 6))
+            if (download_repost) and (weibo["reposts_count"] > 0):
+                self.get_weibo_reposts(
+                    weibo, repost_max_count, self.postgres_insert_reposts
+                )
+                count += 1
+                if count % 20:
+                    sleep(random.randint(3, 6))
+
+    def postgres_insert_comments(self, weibo, comments):
+        """将爬取的评论信息写入PostgreSQL数据库"""
+        if not comments or len(comments) == 0:
+            return
+        postgres_config = self.postgres_config
+        comment_list = []
+        for comment in comments:
+            data = self.parse_postgres_comment(comment, weibo)
+            if data:
+                comment_list.append(data)
+        if comment_list:
+            self.postgres_insert(postgres_config, "comments", comment_list)
+            logger.info(f"已将{len(comment_list)}条评论写入PostgreSQL数据库")
+
+    def postgres_insert_reposts(self, weibo, reposts):
+        """将爬取的转发信息写入PostgreSQL数据库"""
+        if not reposts or len(reposts) == 0:
+            return
+        postgres_config = self.postgres_config
+        repost_list = []
+        for repost in reposts:
+            data = self.parse_postgres_repost(repost, weibo)
+            if data:
+                repost_list.append(data)
+        if repost_list:
+            self.postgres_insert(postgres_config, "reposts", repost_list)
+            logger.info(f"已将{len(repost_list)}条转发写入PostgreSQL数据库")
+
+    def parse_postgres_comment(self, comment, weibo):
+        """解析评论数据为PostgreSQL数据库格式"""
+        if not comment:
+            return None
+        postgres_comment = OrderedDict()
+        postgres_comment["id"] = comment["id"]
+        
+        # 尝试获取bid
+        if "bid" in comment:
+            postgres_comment["bid"] = comment["bid"]
+        else:
+            postgres_comment["bid"] = ""
+            
+        # 尝试获取rootid
+        if "rootid" in comment:
+            postgres_comment["root_id"] = comment["rootid"]
+        else:
+            postgres_comment["root_id"] = ""
+            
+        # 获取创建时间
+        if "created_at" in comment:
+            postgres_comment["created_at"] = comment["created_at"]
+        else:
+            postgres_comment["created_at"] = ""
+            
+        postgres_comment["weibo_id"] = weibo["id"]
+        postgres_comment["user_id"] = comment["user"]["id"]
+        postgres_comment["user_screen_name"] = comment["user"]["screen_name"]
+        
+        # 获取用户头像
+        if "avatar_hd" in comment["user"]:
+            postgres_comment["user_avatar_url"] = comment["user"]["avatar_hd"]
+        elif "profile_image_url" in comment["user"]:
+            postgres_comment["user_avatar_url"] = comment["user"]["profile_image_url"]
+        else:
+            postgres_comment["user_avatar_url"] = ""
+            
+        # 获取评论文本
+        if self.remove_html_tag:
+            postgres_comment["text"] = re.sub('<[^<]+?>', '', comment["text"]).replace('\n', '').strip()
+        else:
+            postgres_comment["text"] = comment["text"]
+        
+        # 获取评论图片
+        postgres_comment["pic_url"] = ""
+        if comment.get("pic"):
+            postgres_comment["pic_url"] = comment["pic"]["large"]["url"]
+            
+        # 获取点赞数
+        if "like_count" in comment:
+            postgres_comment["like_count"] = comment["like_count"]
+        else:
+            postgres_comment["like_count"] = 0
+            
+        return postgres_comment
+
+    def parse_postgres_repost(self, repost, weibo):
+        """解析转发数据为PostgreSQL数据库格式"""
+        if not repost:
+            return None
+        postgres_repost = OrderedDict()
+        postgres_repost["id"] = repost["id"]
+        
+        # 尝试获取bid
+        if "bid" in repost:
+            postgres_repost["bid"] = repost["bid"]
+        else:
+            postgres_repost["bid"] = ""
+            
+        # 获取创建时间
+        if "created_at" in repost:
+            postgres_repost["created_at"] = repost["created_at"]
+        else:
+            postgres_repost["created_at"] = ""
+            
+        postgres_repost["weibo_id"] = weibo["id"]
+        postgres_repost["user_id"] = repost["user"]["id"]
+        postgres_repost["user_screen_name"] = repost["user"]["screen_name"]
+        
+        # 获取用户头像
+        if "avatar_hd" in repost["user"]:
+            postgres_repost["user_avatar_url"] = repost["user"]["avatar_hd"]
+        elif "profile_image_url" in repost["user"]:
+            postgres_repost["user_avatar_url"] = repost["user"]["profile_image_url"]
+        else:
+            postgres_repost["user_avatar_url"] = ""
+            
+        # 获取转发文本
+        text = repost.get("raw_text")
+        if text:
+            text = text.split("//", 1)[0]
+        if text is None or text == "" or text == "Repost":
+            text = "转发微博"
+        postgres_repost["text"] = text
+        
+        # 获取点赞数
+        if "attitudes_count" in repost:
+            postgres_repost["like_count"] = repost["attitudes_count"]
+        else:
+            postgres_repost["like_count"] = 0
+            
+        return postgres_repost
+            
     def mysql_insert(self, mysql_config, table, data_list):
         """
         向MySQL表插入或更新数据
@@ -2131,6 +2614,8 @@ class Weibo(object):
                 self.weibo_to_mongodb(wrote_count)
             if "sqlite" in self.write_mode:
                 self.weibo_to_sqlite(wrote_count)
+            if "postgres" in self.write_mode:
+                self.weibo_to_postgres(wrote_count)
             if self.original_pic_download:
                 self.download_files("img", "original", wrote_count)
             if self.original_video_download:
@@ -2228,6 +2713,11 @@ class Weibo(object):
                     if user_config not in user_config_list:
                         user_config_list.append(user_config)
         return user_config_list
+    
+    def db_init(self):
+        """初始化数据库表"""
+        if "postgres" in self.write_mode:
+            self.init_tables_in_postgres()
 
     def initialize_info(self, user_config):
         """初始化爬虫信息"""
@@ -2240,6 +2730,7 @@ class Weibo(object):
     def start(self):
         """运行爬虫"""
         try:
+            self.db_init()
             for user_config in self.user_config_list:
                 if len(user_config["query_list"]):
                     for query in user_config["query_list"]:
