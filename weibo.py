@@ -448,22 +448,91 @@ class Weibo(object):
         logger.info("%s信息写入MySQL数据库完毕", self.user["screen_name"])
 
     def user_to_postgres(self):
-        """将爬取的用户信息写入PostgreSQL数据库"""
-        postgres_config = {
-            "host": "localhost",
-            "port": 5432,
-            "user": "postgres",
-            "password": "postgres",
-            "dbname": "postgres",
-        }
+        """将用户信息写入PostgreSQL数据库"""
+        postgres_config = self.postgres_config
         
-        # 更新配置使用weibo数据库
-        postgres_config["dbname"] = "weibo"
-        if self.postgres_config:
-            postgres_config = self.postgres_config
+        # 准备用户数据
+        user_data = self.parse_postgres_user(self.user)
         
-        self.postgres_insert(postgres_config, "weibo_user", [self.user])
-        logger.info("%s信息写入PostgreSQL数据库完毕", self.user["screen_name"])
+        try:
+            conn = psycopg2.connect(
+                host=postgres_config["host"],
+                port=postgres_config["port"],
+                user=postgres_config["user"],
+                password=postgres_config["password"],
+                dbname=postgres_config["dbname"]
+            )
+            
+            with conn.cursor() as cursor:
+                # 检查用户是否已存在
+                cursor.execute("SELECT crawler_user_type FROM weibo_user WHERE id = %s", (user_data["id"],))
+                result = cursor.fetchone()
+                
+                if result:
+                    # 用户已存在，保留原有的crawler_user_type
+                    existing_crawler_type = result[0]
+                    user_data["crawler_user_type"] = existing_crawler_type
+                    
+                    # 构建更新语句，但排除crawler_user_type字段
+                    update_fields = [f"{col} = %s" for col in user_data.keys() if col != "crawler_user_type"]
+                    update_values = [user_data[col] for col in user_data.keys() if col != "crawler_user_type"]
+                    update_values.append(user_data["id"])  # WHERE条件的值
+                    
+                    update_sql = f"""
+                    UPDATE weibo_user SET {", ".join(update_fields)}
+                    WHERE id = %s
+                    """
+                    cursor.execute(update_sql, update_values)
+                else:
+                    # 用户不存在，设置crawler_user_type为'friends'
+                    # user_data["crawler_user_type"] = 'friends'
+                    
+                    # 构建插入语句
+                    columns = ", ".join(user_data.keys())
+                    placeholders = ", ".join(["%s"] * len(user_data))
+                    
+                    insert_sql = f"""
+                    INSERT INTO weibo_user ({columns}) 
+                    VALUES ({placeholders})
+                    """
+                    cursor.execute(insert_sql, list(user_data.values()))
+                
+                conn.commit()
+            
+            conn.close()
+            logger.info("用户信息已写入PostgreSQL数据库")
+            
+        except Exception as e:
+            logger.exception(f"写入用户信息到PostgreSQL时出错: {e}")
+
+    def parse_postgres_user(self, user):
+        """解析用户数据为PostgreSQL数据库格式"""
+        if not user:
+            return None
+        postgres_user = OrderedDict()
+        postgres_user["id"] = user["id"]
+        postgres_user["screen_name"] = user["screen_name"]
+        postgres_user["gender"] = user["gender"]
+        postgres_user["statuses_count"] = user["statuses_count"]
+        postgres_user["followers_count"] = user["followers_count"]
+        postgres_user["follow_count"] = user["follow_count"]
+        postgres_user["registration_time"] = user["registration_time"]
+        postgres_user["sunshine"] = user["sunshine"]
+        postgres_user["birthday"] = user["birthday"]
+        postgres_user["location"] = user["location"]
+        postgres_user["education"] = user["education"]
+        postgres_user["company"] = user["company"]
+        postgres_user["description"] = user["description"]
+        postgres_user["profile_url"] = user["profile_url"]
+        postgres_user["profile_image_url"] = user["profile_image_url"]
+        postgres_user["avatar_hd"] = user["avatar_hd"]
+        postgres_user["urank"] = user.get("urank", 0)
+        postgres_user["mbrank"] = user.get("mbrank", 0)
+        postgres_user["verified"] = user.get("verified", False)
+        postgres_user["verified_type"] = user.get("verified_type", -1)
+        postgres_user["verified_reason"] = user.get("verified_reason", "")
+        # crawler_user_type 将在 user_to_postgres 函数中设置
+        return postgres_user
 
     def user_to_database(self):
         """将用户信息写入文件/数据库"""
@@ -1915,6 +1984,7 @@ class Weibo(object):
                 verified BOOLEAN DEFAULT FALSE,
                 verified_type INT,
                 verified_reason varchar(140),
+                crawler_user_type varchar(20),
                 PRIMARY KEY (id)
             );"""
             
